@@ -1,0 +1,214 @@
+---
+title: "Lazy R"
+subtitle: "(... it's not a ranch)"
+author: "John David Smith"
+institute: "Learning Alliances"
+date: "`r Sys.Date()`"
+output:
+  xaringan::moon_reader:
+    lib_dir: libs
+    nature:
+      highlightStyle: github
+      highlightLines: true
+      countIncrementalSlides: false
+---
+
+```{r setup, echo=FALSE, message=FALSE}
+options(htmltools.dir.version = FALSE)
+library(tidyverse)
+library(DBI)
+library(RPostgres)
+library(dbplyr)
+require(knitr)
+library(bookdown)
+library(sqlpetr)
+library(connections)
+sleep_default <- 1
+sqlpetr::sp_docker_start("adventureworks")
+Sys.sleep(sleep_default)
+con <- dbConnect(          # use in other settings
+  RPostgres::Postgres(),
+  # without the previous and next lines, some functions fail with bigint data 
+  #   so change int64 to integer
+	  bigint = "integer",  
+  user = Sys.getenv("DEFAULT_POSTGRES_USER_NAME"),
+  password = Sys.getenv("DEFAULT_POSTGRES_PASSWORD"),
+  dbname = "adventureworks",
+  host = "localhost",
+  port = 5432)
+```
+
+# R is lazy -- and comes with guardrails
+
+By design, R is both a language and an interactive development environment (IDE).  As a language, R tries to be as efficient as possible.  
+
+As an IDE, R creates some guardrails to make it easy and safe to work with your data. 
+
+  * For example `getOption("max.print")` prevents R from printing more rows of data than you want to handle in an interactive session, with a default of `r getOption("max.print")` lines, which may or may not suit you.
+
+---
+
+## SQL, Python and the others
+
+On the other hand 
+
+  * SQL is a "[Structured Query Language (SQL): a standard computer language for relational database management and data manipulation.](https://www.techopedia.com/definition/1245/structured-query-language-sql)". 
+
+  * SQL has various database-specific Interactive Development Environments (IDEs), such as [pgAdmin](https://www.pgadmin.org/) for PostgreSQL.  
+
+  * Python is a *language* with several IDEs.
+---
+
+# R's Design
+
+Roger Peng explains in [R Programming for Data Science](https://bookdown.org/rdpeng/rprogdatascience/history-and-overview-of-r.html#basic-features-of-r) that:
+
+> R has maintained the original S philosophy, which is that it provides a language that is both useful for interactive work, but contains a powerful programming language for developing new tools. 
+
+This is complicated when R interacts with SQL.  
+---
+# Hadley explains
+
+In a [vignette for dbplyr](https://cran.r-project.org/web/packages/dbplyr/vignettes/dbplyr.html):
+
+> The most important difference between ordinary data frames and remote database queries is that your R code is translated into SQL and executed in the database on the remote server, not in R on your local machine. When working with databases, dplyr tries to be as lazy as possible:
+> 
+> * It never pulls data into R unless you explicitly ask for it.
+> 
+> * It delays doing any work until the last possible moment: it collects together everything you want to do and then sends it to the database in one step.
+> 
+
+---
+
+# Exactly when?
+
+Exactly when, which, and how much data is returned from the dbms is the topic of this chapter.  Exactly how the data is represented in the dbms and then translated to a data frame is discussed in the [DBI specification](https://cran.r-project.org/web/packages/DBI/vignettes/spec.html#_fetch_records_from_a_previously_executed_query_).
+
+Eventually, if you are interacting with a dbms from R you will need to understand the differences between lazy loading, lazy evaluation, and lazy queries.
+
+Let's look at some different **kinds of lazy**.
+
+---
+# Lazy loading
+
+Lazy loading is **always** used for code in packages but is optional (selected by the package maintainer) for datasets in packages. -- [R Internals - Lazy Loading](https://cran.r-project.org/doc/manuals/r-release/R-ints.html#Lazy-loading)  
+
+ * Lazy loading means that **the code** for a particular function doesn't actually get loaded into memory until the last minute -- when it's actually executed.
+ * Only the **pointers** to the code get loaded when you execute:
+ 
+> `library(tidyverse)`
+
+---
+# Lazy evaluation 
+
+Essentially 
+
+> "Lazy evaluation is a programming strategy that allows a symbol to be evaluated only when needed."  See [Collin Fay](https://colinfay.me/lazyeval/)  
+
+That means that lazy evaluation is when **symbols** such as [function arguments]( http://adv-r.had.co.nz/Functions.html#function-arguments)  are evaluated. 
+
+Of course [Tidy evaluation](https://colinfay.me/tidyeval-1/) complicates lazy evaluation.
+
+---
+
+# Lazy Queries
+
+When you create a "lazy" query, 
+
+  * you're creating **a pointer** to a set of conditions on the database, but 
+  * the query isn't actually run and the data isn't actually loaded until
+  * you call "next" or some similar method (like the ** `collect()` ** function in the `dbplyr` package) to actually fetch the data and load it into an object.
+
+[Lazy query definition](https://www.quora.com/What-is-a-lazy-query)
+
+---
+
+# Lazy queries
+
+When does a lazy query trigger data retrieval?  It depends on a lot of factors, as we explore below:
+
+--
+
+Define the three tables discussed in the previous chapter to build a _black box_ query:
+```{r}
+sales_person_table <- tbl(con, in_schema("sales", "salesperson")) %>% 
+  select(-rowguid) %>% 
+  rename(sale_info_updated = modifieddate)
+
+employee_table <- tbl(con, in_schema("humanresources", "employee")) %>% 
+  select(-modifieddate, -rowguid)
+
+person_table <- tbl(con, in_schema("person", "person")) %>% 
+  select(-modifieddate, -rowguid)
+```
+
+---
+
+# Here's an SQL query for testing
+
+Here is a typical string of `dplyr` verbs strung together with the magrittr `%>%` pipe command that will be used to tease out the several different behaviors that a lazy query has when passed to different R functions.  This query joins three connection objects into a query we'll call `Q`:
+
+```{r}
+
+Q <- sales_person_table %>%
+  dplyr::left_join(employee_table, by = c("businessentityid" = "businessentityid")) %>%
+  dplyr::left_join(person_table , by = c("businessentityid" = "businessentityid")) %>% 
+  dplyr::select(firstname, lastname, salesytd, birthdate) 
+```
+
+---
+# Take a peek at 'Q' with `str()`
+The `str` function gives us a hint at how R is collecting information that can be used to construct and execute a query later on:
+```{r}
+str(Q, max.level = 2)
+```
+
+---
+# Same thing with `print()`
+
+```{r}
+Q %>% print()
+```
+---
+# In summary, 
+
+## these commands return data from the DBMS 
+
+> `Q %>% print()` Prints x rows; same as just entering `Q`  
+
+> `Q %>% dplyr::as_tibble()` Forces `Q` to be a tibble
+
+> `Q %>% head()` Prints the first 6 rows 
+
+> `Q %>% dplyr::tally()` Counts all the rows -- on the dbms side
+
+> `Q %>% dplyr::collect(n = 20)` Prints 20 rows  
+
+> `Q %>% dplyr::collect(n = 20) %>% head()` Prints 6 rows  
+
+> `Q %>% ggplot(aes(salesytd)) + geom_histogram()` Plots a histogram
+
+---
+# Nothing is sent to the DBMS with these
+
+> `Q %>% tail()`
+
+> `Q %>% length()` is useless because it counts the rows in the *list* `Q`
+
+> `Q %>% str()` Shows the top 3 levels of `Q` 
+
+> `Q %>% nrow()` results in NA - It **attempts** to determine the number of rows 
+
+> `Q %>% dplyr::show_query()` **Translates** the lazy query object into SQL 
+
+---
+# More...
+
+[Exploring Enterprise Databases with R: A Tidyverse Approach](https://smithjd.github.io/sql-pet/) by John David Smith, Sophie Yang, M. Edward (Ed) Borasky, Jim Tyhurst, Scott Came, Mary Anne Thygesen, and Ian Frantz goes into more detail in Chapter 10:
+
+* [Lazy Evaluation and Execution Environment](https://smithjd.github.io/sql-pet/chapter-lazy-evaluation-and-timing.html)
+
+
+> Builds on this lazy loading discussion
+
+> Demonstrates how the use of the dplyr::collect() creates a boundary between code that is sent to a dbms and code that is executed locally in your R session

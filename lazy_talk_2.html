@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="" xml:lang="">
+  <head>
+    <title>Lazy R</title>
+    <meta charset="utf-8" />
+    <meta name="author" content="John David Smith" />
+    <meta name="date" content="2020-04-21" />
+    <link href="libs/remark-css/default.css" rel="stylesheet" />
+    <link href="libs/remark-css/default-fonts.css" rel="stylesheet" />
+  </head>
+  <body>
+    <textarea id="source">
+class: center, middle, inverse, title-slide
+
+# Lazy R
+## (… it’s not a ranch)
+### John David Smith
+### Learning Alliances
+### 2020-04-21
+
+---
+
+
+
+
+# R is lazy -- and comes with guardrails
+
+By design, R is both a language and an interactive development environment (IDE).  As a language, R tries to be as efficient as possible.  
+
+As an IDE, R creates some guardrails to make it easy and safe to work with your data. 
+
+  * For example `getOption("max.print")` prevents R from printing more rows of data than you want to handle in an interactive session, with a default of 1000 lines, which may or may not suit you.
+
+---
+
+## SQL, Python and the others
+
+On the other hand 
+
+  * SQL is a "[Structured Query Language (SQL): a standard computer language for relational database management and data manipulation.](https://www.techopedia.com/definition/1245/structured-query-language-sql)". 
+
+  * SQL has various database-specific Interactive Development Environments (IDEs), such as [pgAdmin](https://www.pgadmin.org/) for PostgreSQL.  
+
+  * Python is a *language* with several IDEs.
+---
+
+# R's Design
+
+Roger Peng explains in [R Programming for Data Science](https://bookdown.org/rdpeng/rprogdatascience/history-and-overview-of-r.html#basic-features-of-r) that:
+
+&gt; R has maintained the original S philosophy, which is that it provides a language that is both useful for interactive work, but contains a powerful programming language for developing new tools. 
+
+This is complicated when R interacts with SQL.  
+---
+# Hadley explains
+
+In a [vignette for dbplyr](https://cran.r-project.org/web/packages/dbplyr/vignettes/dbplyr.html):
+
+&gt; The most important difference between ordinary data frames and remote database queries is that your R code is translated into SQL and executed in the database on the remote server, not in R on your local machine. When working with databases, dplyr tries to be as lazy as possible:
+&gt; 
+&gt; * It never pulls data into R unless you explicitly ask for it.
+&gt; 
+&gt; * It delays doing any work until the last possible moment: it collects together everything you want to do and then sends it to the database in one step.
+&gt; 
+
+---
+
+# Exactly when?
+
+Exactly when, which, and how much data is returned from the dbms is the topic of this chapter.  Exactly how the data is represented in the dbms and then translated to a data frame is discussed in the [DBI specification](https://cran.r-project.org/web/packages/DBI/vignettes/spec.html#_fetch_records_from_a_previously_executed_query_).
+
+Eventually, if you are interacting with a dbms from R you will need to understand the differences between lazy loading, lazy evaluation, and lazy queries.
+
+Let's look at some different **kinds of lazy**.
+
+---
+# Lazy loading
+
+Lazy loading is **always** used for code in packages but is optional (selected by the package maintainer) for datasets in packages. -- [R Internals - Lazy Loading](https://cran.r-project.org/doc/manuals/r-release/R-ints.html#Lazy-loading)  
+
+ * Lazy loading means that **the code** for a particular function doesn't actually get loaded into memory until the last minute -- when it's actually executed.
+ * Only the **pointers** to the code get loaded when you execute:
+ 
+&gt; `library(tidyverse)`
+
+---
+# Lazy evaluation 
+
+Essentially 
+
+&gt; "Lazy evaluation is a programming strategy that allows a symbol to be evaluated only when needed."  See [Collin Fay](https://colinfay.me/lazyeval/)  
+
+That means that lazy evaluation is when **symbols** such as [function arguments]( http://adv-r.had.co.nz/Functions.html#function-arguments)  are evaluated. 
+
+Of course [Tidy evaluation](https://colinfay.me/tidyeval-1/) complicates lazy evaluation.
+
+---
+
+# Lazy Queries
+
+When you create a "lazy" query, 
+
+  * you're creating **a pointer** to a set of conditions on the database, but 
+  * the query isn't actually run and the data isn't actually loaded until
+  * you call "next" or some similar method (like the ** `collect()` ** function in the `dbplyr` package) to actually fetch the data and load it into an object.
+
+[Lazy query definition](https://www.quora.com/What-is-a-lazy-query)
+
+---
+
+# Lazy queries
+
+When does a lazy query trigger data retrieval?  It depends on a lot of factors, as we explore below:
+
+--
+
+Define the three tables discussed in the previous chapter to build a _black box_ query:
+
+```r
+sales_person_table &lt;- tbl(con, in_schema("sales", "salesperson")) %&gt;% 
+  select(-rowguid) %&gt;% 
+  rename(sale_info_updated = modifieddate)
+
+employee_table &lt;- tbl(con, in_schema("humanresources", "employee")) %&gt;% 
+  select(-modifieddate, -rowguid)
+
+person_table &lt;- tbl(con, in_schema("person", "person")) %&gt;% 
+  select(-modifieddate, -rowguid)
+```
+
+---
+
+# Here's an SQL query for testing
+
+Here is a typical string of `dplyr` verbs strung together with the magrittr `%&gt;%` pipe command that will be used to tease out the several different behaviors that a lazy query has when passed to different R functions.  This query joins three connection objects into a query we'll call `Q`:
+
+
+```r
+Q &lt;- sales_person_table %&gt;%
+  dplyr::left_join(employee_table, by = c("businessentityid" = "businessentityid")) %&gt;%
+  dplyr::left_join(person_table , by = c("businessentityid" = "businessentityid")) %&gt;% 
+  dplyr::select(firstname, lastname, salesytd, birthdate) 
+```
+
+---
+# Take a peek at 'Q' with `str()`
+The `str` function gives us a hint at how R is collecting information that can be used to construct and execute a query later on:
+
+```r
+str(Q, max.level = 2)
+```
+
+```
+## List of 2
+##  $ src:List of 2
+##   ..$ con  :Formal class 'PqConnection' [package "RPostgres"] with 3 slots
+##   ..$ disco: NULL
+##   ..- attr(*, "class")= chr [1:4] "src_PqConnection" "src_dbi" "src_sql" "src"
+##  $ ops:List of 4
+##   ..$ name: chr "select"
+##   ..$ x   :List of 4
+##   .. ..- attr(*, "class")= chr [1:3] "op_join" "op_double" "op"
+##   ..$ dots: list()
+##   ..$ args:List of 1
+##   ..- attr(*, "class")= chr [1:3] "op_select" "op_single" "op"
+##  - attr(*, "class")= chr [1:5] "tbl_PqConnection" "tbl_dbi" "tbl_sql" "tbl_lazy" ...
+```
+
+---
+# Same thing with `print()`
+
+
+```r
+Q %&gt;% print()
+```
+
+```
+## # Source:   lazy query [?? x 4]
+## # Database: postgres [postgres@localhost:5432/adventureworks]
+##    firstname lastname     salesytd birthdate 
+##    &lt;chr&gt;     &lt;chr&gt;           &lt;dbl&gt; &lt;date&gt;    
+##  1 Stephen   Jiang         559698. 1951-10-17
+##  2 Michael   Blythe       3763178. 1968-12-25
+##  3 Linda     Mitchell     4251369. 1980-02-27
+##  4 Jillian   Carson       3189418. 1962-08-29
+##  5 Garrett   Vargas       1453719. 1975-02-04
+##  6 Tsvi      Reiter       2315186. 1974-01-18
+##  7 Pamela    Ansman-Wolfe 1352577. 1974-12-06
+##  8 Shu       Ito          2458536. 1968-03-09
+##  9 José      Saraiva      2604541. 1963-12-11
+## 10 David     Campbell     1573013. 1974-02-11
+## # … with more rows
+```
+---
+# In summary, 
+
+## these commands return data from the DBMS 
+
+&gt; `Q %&gt;% print()` Prints x rows; same as just entering `Q`  
+
+&gt; `Q %&gt;% dplyr::as_tibble()` Forces `Q` to be a tibble
+
+&gt; `Q %&gt;% head()` Prints the first 6 rows 
+
+&gt; `Q %&gt;% dplyr::tally()` Counts all the rows -- on the dbms side
+
+&gt; `Q %&gt;% dplyr::collect(n = 20)` Prints 20 rows  
+
+&gt; `Q %&gt;% dplyr::collect(n = 20) %&gt;% head()` Prints 6 rows  
+
+&gt; `Q %&gt;% ggplot(aes(salesytd)) + geom_histogram()` Plots a histogram
+
+---
+# Nothing is sent to the DBMS with these
+
+&gt; `Q %&gt;% tail()`
+
+&gt; `Q %&gt;% length()` is useless because it counts the rows in the *list* `Q`
+
+&gt; `Q %&gt;% str()` Shows the top 3 levels of `Q` 
+
+&gt; `Q %&gt;% nrow()` results in NA - It **attempts** to determine the number of rows 
+
+&gt; `Q %&gt;% dplyr::show_query()` **Translates** the lazy query object into SQL 
+
+---
+# More...
+
+[Exploring Enterprise Databases with R: A Tidyverse Approach](https://smithjd.github.io/sql-pet/) by John David Smith, Sophie Yang, M. Edward (Ed) Borasky, Jim Tyhurst, Scott Came, Mary Anne Thygesen, and Ian Frantz goes into more detail in Chapter 10:
+
+* [Lazy Evaluation and Execution Environment](https://smithjd.github.io/sql-pet/chapter-lazy-evaluation-and-timing.html)
+
+
+&gt; Builds on this lazy loading discussion
+
+&gt; Demonstrates how the use of the dplyr::collect() creates a boundary between code that is sent to a dbms and code that is executed locally in your R session
+    </textarea>
+<style data-target="print-only">@media screen {.remark-slide-container{display:block;}.remark-slide-scaler{box-shadow:none;}}</style>
+<script src="https://remarkjs.com/downloads/remark-latest.min.js"></script>
+<script>var slideshow = remark.create({
+"highlightStyle": "github",
+"highlightLines": true,
+"countIncrementalSlides": false
+});
+if (window.HTMLWidgets) slideshow.on('afterShowSlide', function (slide) {
+  window.dispatchEvent(new Event('resize'));
+});
+(function(d) {
+  var s = d.createElement("style"), r = d.querySelector(".remark-slide-scaler");
+  if (!r) return;
+  s.type = "text/css"; s.innerHTML = "@page {size: " + r.style.width + " " + r.style.height +"; }";
+  d.head.appendChild(s);
+})(document);
+
+(function(d) {
+  var el = d.getElementsByClassName("remark-slides-area");
+  if (!el) return;
+  var slide, slides = slideshow.getSlides(), els = el[0].children;
+  for (var i = 1; i < slides.length; i++) {
+    slide = slides[i];
+    if (slide.properties.continued === "true" || slide.properties.count === "false") {
+      els[i - 1].className += ' has-continuation';
+    }
+  }
+  var s = d.createElement("style");
+  s.type = "text/css"; s.innerHTML = "@media print { .has-continuation { display: none; } }";
+  d.head.appendChild(s);
+})(document);
+// delete the temporary CSS (for displaying all slides initially) when the user
+// starts to view slides
+(function() {
+  var deleted = false;
+  slideshow.on('beforeShowSlide', function(slide) {
+    if (deleted) return;
+    var sheets = document.styleSheets, node;
+    for (var i = 0; i < sheets.length; i++) {
+      node = sheets[i].ownerNode;
+      if (node.dataset["target"] !== "print-only") continue;
+      node.parentNode.removeChild(node);
+    }
+    deleted = true;
+  });
+})();
+(function() {
+  "use strict"
+  // Replace <script> tags in slides area to make them executable
+  var scripts = document.querySelectorAll(
+    '.remark-slides-area .remark-slide-container script'
+  );
+  if (!scripts.length) return;
+  for (var i = 0; i < scripts.length; i++) {
+    var s = document.createElement('script');
+    var code = document.createTextNode(scripts[i].textContent);
+    s.appendChild(code);
+    var scriptAttrs = scripts[i].attributes;
+    for (var j = 0; j < scriptAttrs.length; j++) {
+      s.setAttribute(scriptAttrs[j].name, scriptAttrs[j].value);
+    }
+    scripts[i].parentElement.replaceChild(s, scripts[i]);
+  }
+})();
+(function() {
+  var links = document.getElementsByTagName('a');
+  for (var i = 0; i < links.length; i++) {
+    if (/^(https?:)?\/\//.test(links[i].getAttribute('href'))) {
+      links[i].target = '_blank';
+    }
+  }
+})();
+// adds .remark-code-has-line-highlighted class to <pre> parent elements
+// of code chunks containing highlighted lines with class .remark-code-line-highlighted
+(function(d) {
+  const hlines = d.querySelectorAll('.remark-code-line-highlighted');
+  const preParents = [];
+  const findPreParent = function(line, p = 0) {
+    if (p > 1) return null; // traverse up no further than grandparent
+    const el = line.parentElement;
+    return el.tagName === "PRE" ? el : findPreParent(el, ++p);
+  };
+
+  for (let line of hlines) {
+    let pre = findPreParent(line);
+    if (pre && !preParents.includes(pre)) preParents.push(pre);
+  }
+  preParents.forEach(p => p.classList.add("remark-code-has-line-highlighted"));
+})(document);</script>
+
+<script>
+slideshow._releaseMath = function(el) {
+  var i, text, code, codes = el.getElementsByTagName('code');
+  for (i = 0; i < codes.length;) {
+    code = codes[i];
+    if (code.parentNode.tagName !== 'PRE' && code.childElementCount === 0) {
+      text = code.textContent;
+      if (/^\\\((.|\s)+\\\)$/.test(text) || /^\\\[(.|\s)+\\\]$/.test(text) ||
+          /^\$\$(.|\s)+\$\$$/.test(text) ||
+          /^\\begin\{([^}]+)\}(.|\s)+\\end\{[^}]+\}$/.test(text)) {
+        code.outerHTML = code.innerHTML;  // remove <code></code>
+        continue;
+      }
+    }
+    i++;
+  }
+};
+slideshow._releaseMath(document);
+</script>
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+(function () {
+  var script = document.createElement('script');
+  script.type = 'text/javascript';
+  script.src  = 'https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-MML-AM_CHTML';
+  if (location.protocol !== 'file:' && /^https?:/.test(script.src))
+    script.src  = script.src.replace(/^https?:/, '');
+  document.getElementsByTagName('head')[0].appendChild(script);
+})();
+</script>
+  </body>
+</html>
